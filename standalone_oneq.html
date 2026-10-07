@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0e1116">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>MarketWatch_Canggu</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; background: #0e1116; }
+    body { margin: 0; color: #e8edf2; font: 15px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overscroll-behavior: none; }
+    header { padding: 14px 14px 8px; display: flex; align-items: center; gap: 8px; }
+    h1 { margin: 0; font-size: 16px; flex: 1; }
+    .sub { color: #8b97a3; font-size: 11px; margin-top: 2px; }
+    button, input { border: 0; border-radius: 8px; padding: 8px 12px; background: #243041; color: #e8edf2; font-size: 13px; }
+    input { width: 100%; }
+    .keyrow { padding: 0 12px 8px; display: none; grid-template-columns: 1fr auto; gap: 6px; }
+    .keyrow.show { display: grid; }
+    main { padding: 4px 12px 12px; display: grid; gap: 8px; }
+    .card { background: #171c24; border-radius: 12px; padding: 10px 12px; }
+    .oncard { outline: 1px solid #3d6b8a; }
+    .ticker { font-weight: 750; font-size: 16px; }
+    .meta { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
+    .k { color: #8b97a3; font-size: 10px; }
+    .v { font-variant-numeric: tabular-nums; margin-top: 2px; font-size: 14px; }
+    .up { color: #3dd68c; } .down { color: #ff5d5d; } .warn { color: #ffb020; } .hot { color: #ff5d5d; font-weight: 700; }
+    .err { color: #ffb020; font-size: 12px; margin-top: 6px; }
+    .chartbox { margin: 0 12px 16px; background: #171c24; border-radius: 12px; padding: 8px; }
+    .frames { display: flex; gap: 6px; margin-bottom: 6px; }
+    .frames .on { background: #3d6b8a; }
+    svg { width: 100%; height: 240px; display: block; }
+    .legend { color: #8b97a3; font-size: 11px; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>MarketWatch_Canggu</h1>
+      <div class="sub" id="when"></div>
+    </div>
+    <button onclick="toggleKey()">Key</button>
+    <button onclick="loadAll()">Refresh</button>
+  </header>
+  <div class="keyrow" id="keyrow">
+    <input id="key" type="password" placeholder="Twelve Data API key" autocomplete="off">
+    <button onclick="saveKey()">Save</button>
+  </div>
+  <main id="list"></main>
+  <section class="chartbox">
+    <div class="frames">
+      <button data-f="Daily">Daily</button>
+      <button data-f="Weekly">Weekly</button>
+      <button data-f="Monthly">Monthly</button>
+    </div>
+    <div class="legend" id="legend">Chart</div>
+    <svg id="chart" viewBox="0 0 360 240"></svg>
+  </section>
+  <script>
+    const SYMBOLS = ['ONEQ', 'QQQ', 'HYG', 'IWO'];
+    const KEEP = { Daily: 90, Weekly: 80, Monthly: 60 };
+    const keyEl = document.getElementById('key');
+    const keyRow = document.getElementById('keyrow');
+    let selected = localStorage.getItem('mw_ticker') || 'QQQ';
+    let frame = localStorage.getItem('mw_frame') || 'Daily';
+    let cache = {};
+    keyEl.value = localStorage.getItem('td_key') || '';
+    if (!keyEl.value) keyRow.classList.add('show');
+    function toggleKey() { keyRow.classList.toggle('show'); }
+    function saveKey() {
+      localStorage.setItem('td_key', keyEl.value.trim());
+      keyRow.classList.remove('show');
+      loadAll();
+    }
+    function emaOf(closes) {
+      const k = 2 / 51;
+      const out = new Array(closes.length).fill(null);
+      if (closes.length < 50) return out;
+      let ema = closes.slice(0, 50).reduce((a, b) => a + b, 0) / 50;
+      out[49] = ema;
+      for (let i = 50; i < closes.length; i++) {
+        ema = ema * (1 - k) + closes[i] * k;
+        out[i] = ema;
+      }
+      return out;
+    }
+    function streakOf(bars, emas) {
+      let streak = 0;
+      for (let i = bars.length - 1; i >= 0; i--) {
+        if (emas[i] == null) break;
+        if (bars[i].close < emas[i]) streak++;
+        else break;
+      }
+      return streak;
+    }
+    function bucket(bars, kind) {
+      const groups = [];
+      const map = new Map();
+      bars.forEach(bar => {
+        const d = bar.date;
+        const key = kind === 'Monthly' ? d.slice(0, 7) : isoWeek(d);
+        if (!map.has(key)) {
+          const g = { date: d, open: bar.open, high: bar.high, low: bar.low, close: bar.close };
+          map.set(key, g);
+          groups.push(g);
+        } else {
+          const g = map.get(key);
+          g.high = Math.max(g.high, bar.high);
+          g.low = Math.min(g.low, bar.low);
+          g.close = bar.close;
+          g.date = d;
+        }
+      });
+      return groups;
+    }
+    function isoWeek(date) {
+      const d = new Date(date + 'T00:00:00Z');
+      const day = d.getUTCDay() || 7;
+      d.setUTCDate(d.getUTCDate() + 4 - day);
+      const year = d.getUTCFullYear();
+      const start = new Date(Date.UTC(year, 0, 1));
+      const week = Math.ceil((((d - start) / 86400000) + 1) / 7);
+      return year + '-W' + week;
+    }
+    function series(row) {
+      if (frame === 'Weekly') return bucket(row.bars, 'Weekly');
+      if (frame === 'Monthly') return bucket(row.bars, 'Monthly');
+      return row.bars;
+    }
+    function card(row) {
+      const ratio = row.price != null && row.ema ? (row.price / row.ema - 1) * 100 : null;
+      const cls = ratio == null ? '' : ratio >= 0 ? 'up' : 'down';
+      const rcls = row.streak >= 30 ? 'hot' : row.streak >= 10 ? 'warn' : '';
+      return '<article class="card ' + (row.ticker === selected ? 'oncard' : '') + '" data-t="' + row.ticker + '"><div class="ticker">' + row.ticker + '</div><div class="meta">' +
+        '<div><div class="k">Price</div><div class="v">' + (row.price == null ? '—' : row.price.toLocaleString('en-US', { maximumFractionDigits: 2 })) + '</div></div>' +
+        '<div><div class="k">50 EMA</div><div class="v">' + (row.ema == null ? '—' : row.ema.toLocaleString('en-US', { maximumFractionDigits: 2 })) + '</div></div>' +
+        '<div><div class="k">Ratio</div><div class="v ' + cls + '">' + (ratio == null ? '—' : (ratio > 0 ? '+' : '') + ratio.toFixed(2) + '%') + '</div></div>' +
+        '<div><div class="k">Recession</div><div class="v ' + rcls + '">' + (row.streak == null ? '—' : row.streak + ' days') + '</div></div></div>' +
+        (row.error ? '<div class="err">' + row.error + '</div>' : '') + '</article>';
+    }
+    function draw() {
+      const row = cache[selected];
+      const svg = document.getElementById('chart');
+      const legend = document.getElementById('legend');
+      document.querySelectorAll('.frames button').forEach(b => b.classList.toggle('on', b.dataset.f === frame));
+      if (!row || !row.bars) {
+        legend.textContent = selected + ' · no chart';
+        svg.innerHTML = '';
+        return;
+      }
+      const all = series(row);
+      const bars = all.slice(-KEEP[frame]);
+      const emas = emaOf(all.map(b => b.close)).slice(-KEEP[frame]);
+      const vals = [];
+      bars.forEach(b => vals.push(b.high, b.low));
+      emas.forEach(v => { if (v != null) vals.push(v); });
+      const min = Math.min.apply(null, vals);
+      const max = Math.max.apply(null, vals);
+      const span = max - min || 1;
+      const w = 360, h = 240, pad = 8;
+      const slot = (w - pad * 2) / bars.length;
+      const x = i => pad + slot * i + slot / 2;
+      const y = v => h - pad - ((v - min) / span) * (h - pad * 2);
+      let body = '';
+      bars.forEach((b, i) => {
+        const up = b.close >= b.open;
+        const color = up ? '#3dd68c' : '#ff5d5d';
+        const bw = Math.max(1.4, slot * 0.62);
+        body += '<line x1="' + x(i) + '" x2="' + x(i) + '" y1="' + y(b.high) + '" y2="' + y(b.low) + '" stroke="' + color + '" stroke-width="1"/>';
+        const top = y(Math.max(b.open, b.close));
+        const height = Math.max(1, Math.abs(y(b.open) - y(b.close)));
+        body += '<rect x="' + (x(i) - bw / 2) + '" y="' + top + '" width="' + bw + '" height="' + height + '" fill="' + color + '"/>';
+      });
+      const pts = emas.map((v, i) => v == null ? null : x(i).toFixed(1) + ',' + y(v).toFixed(1)).filter(Boolean);
+      body += '<polyline fill="none" stroke="#ffb020" stroke-width="1.4" points="' + pts.join(' ') + '"/>';
+      legend.textContent = selected + ' · ' + frame.toLowerCase() + ' candles, 50 EMA';
+      svg.innerHTML = body;
+    }
+    async function one(symbol, key) {
+      const url = 'https://api.twelvedata.com/time_series?symbol=' + encodeURIComponent(symbol) +
+        '&interval=1day&outputsize=1500&apikey=' + encodeURIComponent(key);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      if (json.status === 'error' || json.code) throw new Error(json.message || 'no data');
+      const bars = (json.values || []).map(v => ({
+        date: v.datetime, open: Number(v.open), high: Number(v.high), low: Number(v.low), close: Number(v.close)
+      })).filter(v => [v.open, v.high, v.low, v.close].every(Number.isFinite)).reverse();
+      if (bars.length < 50) throw new Error('not enough history');
+      const emas = emaOf(bars.map(b => b.close));
+      return { ticker: symbol, bars: bars, price: bars[bars.length - 1].close, ema: emas[emas.length - 1], streak: streakOf(bars, emas) };
+    }
+    async function loadAll() {
+      const key = keyEl.value.trim();
+      if (!key) { keyRow.classList.add('show'); document.getElementById('when').textContent = 'Paste the key once'; return; }
+      document.getElementById('when').textContent = 'Loading…';
+      const rows = await Promise.all(SYMBOLS.map(async symbol => {
+        try { return await one(symbol, key); }
+        catch (e) { return { ticker: symbol, error: e.message || 'failed' }; }
+      }));
+      cache = {};
+      rows.forEach(r => { cache[r.ticker] = r; });
+      if (!cache[selected] || !cache[selected].bars) selected = rows.find(r => r.bars)?.ticker || 'QQQ';
+      document.getElementById('list').innerHTML = rows.map(card).join('');
+      document.getElementById('list').onclick = e => {
+        const cardEl = e.target.closest('[data-t]');
+        if (!cardEl) return;
+        selected = cardEl.dataset.t;
+        localStorage.setItem('mw_ticker', selected);
+        document.querySelectorAll('.card').forEach(el => el.classList.toggle('oncard', el.dataset.t === selected));
+        draw();
+      };
+      draw();
+      document.getElementById('when').textContent = 'Updated ' + new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    }
+    document.querySelector('.frames').onclick = e => {
+      if (!e.target.dataset.f) return;
+      frame = e.target.dataset.f;
+      localStorage.setItem('mw_frame', frame);
+      draw();
+    };
+    if (keyEl.value) loadAll();
+  </script>
+</body>
+</html>
